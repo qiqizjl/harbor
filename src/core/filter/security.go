@@ -17,7 +17,9 @@ package filter
 import (
 	"context"
 	"fmt"
+	"github.com/goharbor/harbor/src/common/security/ipwhite"
 	"github.com/goharbor/harbor/src/common/utils/oidc"
+	"net"
 	"net/http"
 	"regexp"
 
@@ -120,6 +122,7 @@ func Init() {
 		&robotAuthReqCtxModifier{},
 		&basicAuthReqCtxModifier{},
 		&sessionReqCtxModifier{},
+		&ipWhiteReqCtxModifier{},
 		&unauthorizedReqCtxModifier{}}
 }
 
@@ -576,6 +579,26 @@ func (u *unauthorizedReqCtxModifier) Modify(ctx *beegoctx.Context) bool {
 		log.Debug("creating local database security context...")
 		securCtx = local.NewSecurityContext(nil, pm)
 	}
+	setSecurCtxAndPM(ctx.Request, securCtx, pm)
+	return true
+}
+
+//Support IP white do pull/push
+type ipWhiteReqCtxModifier struct{}
+
+func (u *ipWhiteReqCtxModifier) Modify(ctx *beegoctx.Context) bool {
+	// TODO support config
+	allowIps := "172.17.0.0/16"
+	config.GetPortalURL()
+	_, ipNet, _ := net.ParseCIDR(allowIps)
+	userIP := net.ParseIP(ctx.Input.IP())
+	log.Debugf("UserIP:%s", ctx.Input.IP())
+	if ! ipNet.Contains(userIP) {
+		return false
+	}
+	var securCtx security.Context
+	securCtx = &ipwhite.SecurityContext{}
+	pm := config.GlobalProjectMgr
 	setSecurCtxAndPM(ctx.Request, securCtx, pm)
 	return true
 }
