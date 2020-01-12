@@ -15,9 +15,10 @@
 package local
 
 import (
+	"sync"
+
 	"github.com/goharbor/harbor/src/common"
 	"github.com/goharbor/harbor/src/common/dao"
-	"github.com/goharbor/harbor/src/common/dao/group"
 	"github.com/goharbor/harbor/src/common/models"
 	"github.com/goharbor/harbor/src/common/rbac"
 	"github.com/goharbor/harbor/src/common/rbac/project"
@@ -27,8 +28,10 @@ import (
 
 // SecurityContext implements security.Context interface based on database
 type SecurityContext struct {
-	user *models.User
-	pm   promgr.ProjectManager
+	user      *models.User
+	pm        promgr.ProjectManager
+	evaluator rbac.Evaluator
+	once      sync.Once
 }
 
 // NewSecurityContext ...
@@ -69,19 +72,24 @@ func (s *SecurityContext) IsSolutionUser() bool {
 
 // Can returns whether the user can do action on resource
 func (s *SecurityContext) Can(action rbac.Action, resource rbac.Resource) bool {
-	ns, err := resource.GetNamespace()
-	if err == nil {
-		switch ns.Kind() {
-		case "project":
-			projectIDOrName := ns.Identity()
-			isPublicProject, _ := s.pm.IsPublic(projectIDOrName)
-			projectNamespace := rbac.NewProjectNamespace(projectIDOrName, isPublicProject)
-			user := project.NewUser(s, projectNamespace, s.GetProjectRoles(projectIDOrName)...)
-			return rbac.HasPermission(user, resource, action)
-		}
-	}
+	s.once.Do(func() {
+		s.evaluator = rbac.NewNamespaceEvaluator("project", func(ns rbac.Namespace) rbac.Evaluator {
+			projectID := ns.Identity().(int64)
+			proj, err := s.pm.Get(projectID)
+			if err != nil {
+				log.Errorf("failed to get project %d, error: %v", projectID, err)
+				return nil
+			}
+			if proj == nil {
+				return nil
+			}
 
-	return false
+			user := project.NewUser(s, rbac.NewProjectNamespace(projectID, proj.IsPublic()), s.GetProjectRoles(projectID)...)
+			return rbac.NewUserEvaluator(user)
+		})
+	})
+
+	return s.evaluator != nil && s.evaluator.HasPermission(resource, action)
 }
 
 // GetProjectRoles ...
@@ -128,10 +136,24 @@ func (s *SecurityContext) GetProjectRoles(projectIDOrName interface{}) []int {
 			roles = append(roles, common.RoleGuest)
 		}
 	}
-	if len(roles) != 0 {
-		return roles
+	return mergeRoles(roles, s.GetRolesByGroup(projectIDOrName))
+}
+
+func mergeRoles(rolesA, rolesB []int) []int {
+	type void struct{}
+	var roles []int
+	var placeHolder void
+	roleSet := make(map[int]void)
+	for _, r := range rolesA {
+		roleSet[r] = placeHolder
 	}
-	return s.GetRolesByGroup(projectIDOrName)
+	for _, r := range rolesB {
+		roleSet[r] = placeHolder
+	}
+	for r := range roleSet {
+		roles = append(roles, r)
+	}
+	return roles
 }
 
 // GetRolesByGroup - Get the group role of current user to the project
@@ -140,12 +162,11 @@ func (s *SecurityContext) GetRolesByGroup(projectIDOrName interface{}) []int {
 	user := s.user
 	project, err := s.pm.Get(projectIDOrName)
 	// No user, group or project info
-	if err != nil || project == nil || user == nil || len(user.GroupList) == 0 {
+	if err != nil || project == nil || user == nil || len(user.GroupIDs) == 0 {
 		return roles
 	}
-	// Get role by LDAP group
-	groupDNConditions := group.GetGroupDNQueryCondition(user.GroupList)
-	roles, err = dao.GetRolesByLDAPGroup(project.ProjectID, groupDNConditions)
+	// Get role by Group ID
+	roles, err = dao.GetRolesByGroupID(project.ProjectID, user.GroupIDs)
 	if err != nil {
 		return nil
 	}
@@ -157,8 +178,8 @@ func (s *SecurityContext) GetMyProjects() ([]*models.Project, error) {
 	result, err := s.pm.List(
 		&models.ProjectQueryParam{
 			Member: &models.MemberQuery{
-				Name:      s.GetUsername(),
-				GroupList: s.user.GroupList,
+				Name:     s.GetUsername(),
+				GroupIDs: s.user.GroupIDs,
 			},
 		})
 	if err != nil {

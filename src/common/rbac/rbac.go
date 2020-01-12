@@ -110,6 +110,10 @@ func (p *Policy) GetEffect() string {
 	return eft.String()
 }
 
+func (p *Policy) String() string {
+	return p.Resource.String() + ":" + p.Action.String() + ":" + p.GetEffect()
+}
+
 // Role the interface of rbac role
 type Role interface {
 	// GetRoleName returns the role identity, if empty string role's policies will be ignore
@@ -141,9 +145,4 @@ func (u *BaseUser) GetUserName() string {
 // GetPolicies returns policies of the user
 func (u *BaseUser) GetPolicies() []*Policy {
 	return nil
-}
-
-// HasPermission returns whether the user has action permission on resource
-func HasPermission(user User, resource Resource, action Action) bool {
-	return enforcerForUser(user).Enforce(user.GetUserName(), resource.String(), action.String())
 }

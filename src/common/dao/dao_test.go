@@ -47,8 +47,8 @@ func cleanByUser(username string) {
 	o := GetOrmer()
 	o.Begin()
 
-	err = execUpdate(o, `delete 
-		from project_member 
+	err = execUpdate(o, `delete
+		from project_member
 		where entity_id = (
 			select user_id
 			from harbor_user
@@ -59,7 +59,7 @@ func cleanByUser(username string) {
 		log.Error(err)
 	}
 
-	err = execUpdate(o, `delete  
+	err = execUpdate(o, `delete
 		from project_member
 		where project_id = (
 			select project_id
@@ -71,8 +71,8 @@ func cleanByUser(username string) {
 		log.Error(err)
 	}
 
-	err = execUpdate(o, `delete 
-		from access_log 
+	err = execUpdate(o, `delete
+		from access_log
 		where username = ?
 		`, username)
 	if err != nil {
@@ -80,7 +80,7 @@ func cleanByUser(username string) {
 		log.Error(err)
 	}
 
-	err = execUpdate(o, `delete 
+	err = execUpdate(o, `delete
 		from access_log
 		where project_id = (
 			select project_id
@@ -302,9 +302,6 @@ func TestListUsers(t *testing.T) {
 	if err != nil {
 		t.Errorf("Error occurred in ListUsers: %v", err)
 	}
-	if len(users) != 1 {
-		t.Errorf("Expect one user in list, but the acutal length is %d, the list: %+v", len(users), users)
-	}
 	users2, err := ListUsers(&models.UserQuery{Username: username})
 	if len(users2) != 1 {
 		t.Errorf("Expect one user in list, but the acutal length is %d, the list: %+v", len(users), users)
@@ -327,7 +324,12 @@ func TestResetUserPassword(t *testing.T) {
 		t.Errorf("Error occurred in UpdateUserResetUuid: %v", err)
 	}
 
-	err = ResetUserPassword(models.User{UserID: currentUser.UserID, Password: "HarborTester12345", ResetUUID: uuid, Salt: currentUser.Salt})
+	err = ResetUserPassword(
+		models.User{
+			UserID:          currentUser.UserID,
+			PasswordVersion: utils.SHA256,
+			ResetUUID:       uuid,
+			Salt:            currentUser.Salt}, "HarborTester12345")
 	if err != nil {
 		t.Errorf("Error occurred in ResetUserPassword: %v", err)
 	}
@@ -349,7 +351,12 @@ func TestChangeUserPassword(t *testing.T) {
 		t.Errorf("Error occurred when get user salt")
 	}
 	currentUser.Salt = query.Salt
-	err = ChangeUserPassword(models.User{UserID: currentUser.UserID, Password: "NewHarborTester12345", Salt: currentUser.Salt})
+	err = ChangeUserPassword(
+		models.User{
+			UserID:          currentUser.UserID,
+			Password:        "NewHarborTester12345",
+			PasswordVersion: utils.SHA256,
+			Salt:            currentUser.Salt})
 	if err != nil {
 		t.Errorf("Error occurred in ChangeUserPassword: %v", err)
 	}
@@ -1034,4 +1041,54 @@ func TestSaveConfigEntries(t *testing.T) {
 func TestIsDupRecError(t *testing.T) {
 	assert.True(t, isDupRecErr(fmt.Errorf("pq: duplicate key value violates unique constraint \"properties_k_key\"")))
 	assert.False(t, isDupRecErr(fmt.Errorf("other error")))
+}
+
+func TestWithTransaction(t *testing.T) {
+	reference := "transaction"
+
+	quota := models.Quota{
+		Reference:   reference,
+		ReferenceID: "1",
+		Hard:        "{}",
+	}
+
+	failed := func(o orm.Ormer) error {
+		o.Insert(&quota)
+
+		return fmt.Errorf("failed")
+	}
+
+	var quotaID int64
+	success := func(o orm.Ormer) error {
+		id, err := o.Insert(&quota)
+		if err != nil {
+			return err
+		}
+
+		quotaID = id
+		return nil
+	}
+
+	assert := assert.New(t)
+
+	if assert.Error(WithTransaction(failed)) {
+		var quota models.Quota
+		quota.Reference = reference
+		quota.ReferenceID = "1"
+		err := GetOrmer().Read(&quota, "reference", "reference_id")
+		assert.Error(err)
+		assert.False(quota.ID != 0)
+	}
+
+	if assert.Nil(WithTransaction(success)) {
+		var quota models.Quota
+		quota.Reference = reference
+		quota.ReferenceID = "1"
+		err := GetOrmer().Read(&quota, "reference", "reference_id")
+		assert.Nil(err)
+		assert.True(quota.ID != 0)
+		assert.Equal(quotaID, quota.ID)
+
+		GetOrmer().Delete(&models.Quota{ID: quotaID}, "id")
+	}
 }
